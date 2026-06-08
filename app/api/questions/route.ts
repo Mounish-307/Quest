@@ -1,31 +1,89 @@
 import { supabase } from "@/lib/supabase";
-import { getQuestionsPage, searchQuestions } from "@/lib/questions";
+import { NextResponse } from "next/server";
 
-const PAGE_SIZE = 10;
+export async function GET(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const query = searchParams.get("q");
+    const offset = parseInt(searchParams.get("offset") || "0", 10);
+    const limit = 10;
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const q = searchParams.get("q")?.trim();
+    let supabaseQuery = supabase
+      .from("questions")
+      .select("id, content, title") 
+      .range(offset, offset + limit - 1);
 
-  if (q) {
-    const questions = await searchQuestions(q, PAGE_SIZE);
-    return Response.json({ questions, hasMore: false });
+    if (query) {
+      supabaseQuery = supabaseQuery.ilike("content", `%${query}%`);
+    }
+
+    const { data: rawQuestions, error: questionsError } = await supabaseQuery;
+
+    if (questionsError) {
+      return NextResponse.json({ error: questionsError.message }, { status: 500 });
+    }
+
+    if (!rawQuestions || rawQuestions.length === 0) {
+      return NextResponse.json({ questions: [], hasMore: false });
+    }
+
+    const questionIds = rawQuestions.map(q => q.id);
+    const { data: rawVotes } = await supabase
+      .from("votes")
+      .select("question_id")
+      .in("question_id", questionIds);
+
+    const questions = rawQuestions.map((q: any) => {
+      const matchCount = rawVotes 
+        ? rawVotes.filter((v: any) => v.question_id === q.id).length 
+        : 0;
+
+      return {
+        id: String(q.id),
+        body: q.content, 
+        author: q.title || null, 
+        votes: matchCount,
+      };
+    });
+
+    const hasMore = questions.length === limit;
+    return NextResponse.json({ questions, hasMore });
+
+  } catch {
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
-
-  const offset = Number(searchParams.get("offset") ?? 0);
-  const { questions, hasMore } = await getQuestionsPage(offset, PAGE_SIZE);
-  return Response.json({ questions, hasMore });
 }
 
-export async function POST(req: Request) {
-  const { body, author } = await req.json();
+export async function POST(request: Request) {
+  try {
+    const { body } = await request.json();
 
-  const { data, error } = await supabase
-    .from("questions")
-    .insert({ body, author })
-    .select()
-    .single();
+    if (!body || !body.trim()) {
+      return NextResponse.json({ error: "Content text required" }, { status: 400 });
+    }
 
-  if (error) return Response.json({ error: error.message }, { status: 500 });
-  return Response.json(data);
+    const { data, error } = await supabase
+      .from("questions")
+      .insert({ 
+        content: body,
+        title: "Anonymous"
+      })
+      .select();
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    const createdQuestion = data?.[0] ? {
+      id: String(data[0].id),
+      body: data[0].content,
+      author: data[0].title || null,
+      votes: 0
+    } : {};
+
+    return NextResponse.json(createdQuestion);
+    
+  } catch {
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+  }
 }

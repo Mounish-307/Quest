@@ -21,54 +21,98 @@ export default function QuestionsList({
   const [query, setQuery] = useState("");
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [loading, setLoading] = useState(false);
-
   const [hydrated, setHydrated] = useState(false);
+
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [loadingAi, setLoadingAi] = useState(false);
+
   useEffect(() => setHydrated(true), []);
 
-  // Debounced search: wait 300ms after typing stops; each keystroke cancels
-  // the previous timer, so "deploying" fires one request, not nine.
   useEffect(() => {
+    if (!query.trim()) {
+      return;
+    }
+
     const id = setTimeout(async () => {
-      const url = query
-        ? `/api/questions?q=${encodeURIComponent(query)}`
-        : `/api/questions`;
-      const res = await fetch(url);
-      const data = await res.json();
-      setQuestions(data.questions);
-      setHasMore(data.hasMore);
+      const url = `/api/questions?q=${encodeURIComponent(query)}`;
+      
+      try {
+        const res = await fetch(url);
+        if (!res.ok) {
+          console.error(`Failed to fetch questions. Status: ${res.status}`);
+          return;
+        }
+        const data = await res.json();
+        setQuestions(data.questions ?? []);
+        setHasMore(data.hasMore ?? false);
+      } catch (error) {
+        console.error("Error parsing or fetching search results:", error);
+      }
     }, 300);
 
-    return () => clearTimeout(id); // cancel the pending timer on each keystroke
+    return () => clearTimeout(id);
   }, [query]);
+
+  async function fetchSuggestions() {
+    setLoadingAi(true);
+    try {
+      const res = await fetch("/api/questions/suggest");
+      if (res.ok) {
+        const data = await res.json();
+        setSuggestions(data.suggestions ?? []);
+      } else {
+        console.error(`Suggestions failed. Status: ${res.status}`);
+      }
+    } catch (err) {
+      console.error("Error fetching AI suggestions:", err);
+    } finally {
+      setLoadingAi(false);
+    }
+  }
 
   async function submit() {
     if (!draft.trim()) return;
 
-    const res = await fetch("/api/questions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body: draft }),
-    });
-    const created = await res.json();
+    try {
+      const res = await fetch("/api/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: draft }),
+      });
 
-    setQuestions((qs) => [{ ...created, votes: 0 }, ...qs]);
-    setDraft("");
+      if (!res.ok) {
+        console.error(`Failed to submit question. Status: ${res.status}`);
+        return;
+      }
+
+      const created = await res.json();
+      setQuestions((qs) => [{ ...created, votes: 0 }, ...qs]);
+      setDraft("");
+    } catch (error) {
+      console.error("Error submitting question:", error);
+    }
   }
 
   async function upvote(id: string) {
-    // optimistic: assume success, update the UI now
     setQuestions((qs) =>
       qs.map((q) => (q.id === id ? { ...q, votes: q.votes + 1 } : q))
     );
 
-    const res = await fetch(`/api/questions/${id}/vote`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voterId: getVoterId() }),
-    });
+    try {
+      const res = await fetch(`/api/questions/${id}/vote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voterId: getVoterId() }),
+      });
 
-    // server said no (already voted) — roll back
-    if (!res.ok) {
+      if (!res.ok) {
+        console.warn(`Upvote rejected by server. Status: ${res.status}`);
+        setQuestions((qs) =>
+          qs.map((q) => (q.id === id ? { ...q, votes: q.votes - 1 } : q))
+        );
+      }
+    } catch (error) {
+      console.error("Error sending upvote:", error);
       setQuestions((qs) =>
         qs.map((q) => (q.id === id ? { ...q, votes: q.votes - 1 } : q))
       );
@@ -77,16 +121,27 @@ export default function QuestionsList({
 
   async function loadMore() {
     setLoading(true);
-    const res = await fetch(`/api/questions?offset=${questions.length}`);
-    const data = await res.json();
-    setQuestions((qs) => [...qs, ...data.questions]);
-    setHasMore(data.hasMore);
-    setLoading(false);
+    try {
+      const res = await fetch(`/api/questions?offset=${questions.length}`);
+      
+      if (!res.ok) {
+        console.error(`Failed to load more questions. Status: ${res.status}`);
+        setLoading(false);
+        return;
+      }
+
+      const data = await res.json();
+      setQuestions((qs) => [...qs, ...(data.questions ?? [])]);
+      setHasMore(data.hasMore ?? false);
+    } catch (error) {
+      console.error("Error loading more questions:", error);
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
     <div className="space-y-5">
-      {/* Ask box */}
       <div className="rounded-2xl border bg-surface p-4 shadow-sm">
         <div className="flex gap-2">
           <input
@@ -105,7 +160,35 @@ export default function QuestionsList({
         </div>
       </div>
 
-      {/* Search + hydration status */}
+      <div className="my-1 space-y-2 px-1">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted">
+            Need inspiration?
+          </span>
+          <button
+            onClick={fetchSuggestions}
+            disabled={loadingAi}
+            className="text-xs font-medium text-brand hover:underline disabled:opacity-50"
+          >
+            {loadingAi ? "Generating..." : "✨ Suggest questions with Gemini"}
+          </button>
+        </div>
+
+        {suggestions.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {suggestions.map((suggestion, idx) => (
+              <button
+                key={idx}
+                onClick={() => setDraft(suggestion)}
+                className="rounded-xl border bg-surface px-3.5 py-2 text-left text-xs text-foreground shadow-sm transition-all hover:border-brand hover:bg-brand-soft"
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="flex items-center gap-3">
         <input
           value={query}
@@ -118,7 +201,6 @@ export default function QuestionsList({
         </span>
       </div>
 
-      {/* Questions */}
       <ul className="space-y-3">
         {questions.map((q) => (
           <li
